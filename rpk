@@ -1,0 +1,235 @@
+#!/bin/sh
+#
+# rpk - package manager for Raye Linux
+#
+# Packages are tarballs laid out from /, listed in a repo INDEX along
+# with their sha256. rpk remembers every file it unpacked so it can take
+# them away again later, and that's most of what it does.
+#
+# usage: rpk [-r ROOT] COMMAND [ARGS]
+#
+#   list               what the repo has, * marks what's installed
+#   installed          what's installed
+#   info PKG           details for one package
+#   files PKG          files an installed package owns
+#   owner FILE         which package owns FILE
+#   install PKG...     install packages, dependencies first
+#   remove PKG...      remove packages
+#
+#   -r ROOT            work on the system mounted at ROOT instead of /
+#
+# The repo comes from REPO= in /etc/rpk.conf: a directory, or an http(s)
+# URL with the INDEX and tarballs in it. RPK_REPO overrides it.
+#
+# INDEX has one line per package:  name|version|sha256|depends|description
+
+set -e
+
+ROOT=/
+REPO=/var/cache/rpk/repo
+[ -r /etc/rpk.conf ] && . /etc/rpk.conf
+REPO=${RPK_REPO:-$REPO}
+
+msg() { printf '\033[1;35m->\033[m %s\n' "$*"; }
+die() { printf '\033[1;31merror:\033[m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    sed -n '/^# usage/,/^# The repo/p' "$0" | sed -e '$d' -e 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+# get NAME DEST: copy (or download) NAME from the repo
+get() {
+    case $REPO in
+        http://*|https://*) wget -q -O "$2" "$REPO/$1" ;;
+        *)                  cp "$REPO/$1" "$2" ;;
+    esac
+}
+
+index() {
+    [ -s "$tmp/INDEX" ] && return
+    get INDEX "$tmp/INDEX" 2>/dev/null || die "can't read the repo index in $REPO"
+}
+
+# field PKG N: column N of PKG's line in the INDEX
+field() {
+    index
+    awk -F'|' -v n="$1" -v f="$2" '
+        $1 == n { print $f; found = 1 }
+        END     { exit !found }' "$tmp/INDEX"
+}
+
+installed_version() {
+    cat "$db/$1/version" 2>/dev/null
+}
+
+# deps PKG...: print PKG and everything it pulls in, dependencies first
+deps() {
+    local p d
+    for p do
+        case " $seen " in *" $p "*) continue ;; esac
+        seen="$seen $p"
+        d=$(field "$p" 4) || die "there's no package called '$p'"
+        # word splitting on the dependency list is the point here
+        [ -z "$d" ] || deps $d
+        echo "$p"
+    done
+}
+
+# rm_paths: remove the paths read from stdin (relative to ROOT). Reverse
+# order puts files before the directories holding them, and directories
+# only go if nothing else is left in them.
+rm_paths() {
+    sort -r | while read -r f; do
+        case $f in
+            */) rmdir "$ROOT/$f" 2>/dev/null || : ;;
+            *)  rm -f "$ROOT/$f" ;;
+        esac
+    done
+}
+
+install_pkg() {
+    name=$1
+    ver=$(field "$name" 2)
+    sum=$(field "$name" 3)
+    file=$name-$ver.tar.xz
+    old=$(installed_version "$name") || old=
+
+    if [ "$old" = "$ver" ]; then
+        msg "$name $ver is already installed"
+        return
+    fi
+
+    get "$file" "$tmp/$file" || die "can't fetch $file"
+    [ "$(sha256sum "$tmp/$file" | cut -d' ' -f1)" = "$sum" ] ||
+        die "$file doesn't match the checksum in the index"
+
+    tar -tJf "$tmp/$file" > "$tmp/files"
+    grep -v '/$' "$tmp/files" > "$tmp/plain" || :
+
+    # never overwrite a file that belongs to another package
+    if [ -s "$tmp/plain" ]; then
+        for f in "$db"/*/files; do
+            [ -f "$f" ] || continue
+            owner=${f%/files}
+            owner=${owner##*/}
+            [ "$owner" = "$name" ] && continue
+            clash=$(grep -Fx -f "$tmp/plain" "$f" | head -n 1) || :
+            [ -z "$clash" ] || die "$name wants /$clash, which belongs to $owner"
+        done
+    fi
+
+    msg "installing $name $ver${old:+ (was $old)}"
+    tar -xJf "$tmp/$file" -C "$ROOT"
+
+    # on upgrade, drop whatever the old version had and this one doesn't
+    if [ -f "$db/$name/files" ]; then
+        grep -vFx -f "$tmp/files" "$db/$name/files" | rm_paths
+    fi
+
+    mkdir -p "$db/$name"
+    cp "$tmp/files" "$db/$name/files"
+    echo "$ver" > "$db/$name/version"
+    field "$name" 4 > "$db/$name/depends"
+}
+
+remove_pkg() {
+    name=$1
+    [ -d "$db/$name" ] || die "$name isn't installed"
+
+    for f in "$db"/*/depends; do
+        [ -f "$f" ] || continue
+        user=${f%/depends}
+        user=${user##*/}
+        [ "$user" = "$name" ] && continue
+        tr ' ' '\n' < "$f" | grep -qx "$name" && die "$user needs $name"
+    done
+
+    msg "removing $name $(installed_version "$name")"
+    rm_paths < "$db/$name/files"
+    rm -rf "${db:?}/$name"
+}
+
+need_root() {
+    [ "$(id -u)" = 0 ] || die "this needs root"
+}
+
+while getopts r:h opt; do
+    case $opt in
+        r) ROOT=$OPTARG ;;
+        h) usage ;;
+        *) usage 1 ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+db=${ROOT%/}/var/db/rpk
+[ "$#" -gt 0 ] || usage 1
+cmd=$1
+shift
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+case $cmd in
+    list|ls)
+        index
+        while IFS='|' read -r n v _ _ desc; do
+            mark=' '
+            [ -f "$db/$n/version" ] && mark='*'
+            printf '%s %-12s %-12s %s\n' "$mark" "$n" "$v" "$desc"
+        done < "$tmp/INDEX"
+        ;;
+
+    installed)
+        for d in "$db"/*/; do
+            [ -d "$d" ] || continue
+            n=${d%/}
+            printf '%-12s %s\n' "${n##*/}" "$(cat "$d/version")"
+        done
+        ;;
+
+    info)
+        [ "$1" ] || die "info about what?"
+        desc=$(field "$1" 5) || die "there's no package called '$1'"
+        printf '%-12s %s\n' \
+            name "$1" \
+            about "$desc" \
+            version "$(field "$1" 2)" \
+            installed "$(installed_version "$1" || echo no)" \
+            depends "$(field "$1" 4)"
+        ;;
+
+    files)
+        [ -f "$db/$1/files" ] || die "${1:-that} isn't installed"
+        sed 's|^|/|' "$db/$1/files"
+        ;;
+
+    owner)
+        [ "$1" ] || die "owner of what?"
+        path=${1#/}
+        grep -lFx "$path" "$db"/*/files 2>/dev/null |
+            sed 's|/files$||; s|.*/||' | grep . || die "nothing owns /$path"
+        ;;
+
+    install|add)
+        [ "$#" -gt 0 ] || die "install what?"
+        need_root
+        pkgs=$(deps "$@")
+        for p in $pkgs; do
+            install_pkg "$p"
+        done
+        ;;
+
+    remove|rm)
+        [ "$#" -gt 0 ] || die "remove what?"
+        need_root
+        for p do
+            remove_pkg "$p"
+        done
+        ;;
+
+    *)
+        usage 1
+        ;;
+esac
