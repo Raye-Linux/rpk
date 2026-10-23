@@ -15,6 +15,7 @@ rpk list                  what the repo has, * marks what's installed
 rpk installed
 rpk info dropbear
 rpk install dropbear      dependencies come first
+rpk upgrade               everything installed, up to the repo's version
 rpk remove dropbear
 rpk files dropbear
 rpk owner /usr/bin/ssh

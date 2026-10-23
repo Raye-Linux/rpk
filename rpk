@@ -14,6 +14,7 @@
 #   files PKG          files an installed package owns
 #   owner FILE         which package owns FILE
 #   install PKG...     install packages, dependencies first
+#   upgrade            bring every installed package up to the repo's version
 #   remove PKG...      remove packages
 #
 #   -r ROOT            work on the system mounted at ROOT instead of /
@@ -38,11 +39,20 @@ usage() {
     exit "${1:-0}"
 }
 
-# get NAME DEST: copy (or download) NAME from the repo
+# get NAME DEST: copy (or download) NAME from the repo. curl if it's
+# there: busybox wget doesn't check certificates
 get() {
     case $REPO in
-        http://*|https://*) wget -q -O "$2" "$REPO/$1" ;;
-        *)                  cp "$REPO/$1" "$2" ;;
+        http://*|https://*)
+            if command -v curl >/dev/null; then
+                curl -fsSL -o "$2" "$REPO/$1"
+            else
+                wget -q -O "$2" "$REPO/$1"
+            fi
+            ;;
+        *)
+            cp "$REPO/$1" "$2"
+            ;;
     esac
 }
 
@@ -216,6 +226,31 @@ case $cmd in
         [ "$#" -gt 0 ] || die "install what?"
         need_root
         pkgs=$(deps "$@")
+        for p in $pkgs; do
+            install_pkg "$p"
+        done
+        ;;
+
+    upgrade)
+        need_root
+        index
+        stale=
+        for d in "$db"/*/; do
+            [ -d "$d" ] || continue
+            n=${d%/}
+            n=${n##*/}
+            # gone from the repo: nothing to upgrade it to, leave it be
+            new=$(field "$n" 2) || continue
+            [ "$new" = "$(installed_version "$n")" ] || stale="$stale $n"
+        done
+
+        if [ -z "$stale" ]; then
+            msg "everything is up to date"
+            exit 0
+        fi
+        # an upgrade can bring in new dependencies, deps sorts them first
+        # shellcheck disable=SC2086
+        pkgs=$(deps $stale)
         for p in $pkgs; do
             install_pkg "$p"
         done
