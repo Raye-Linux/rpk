@@ -19,12 +19,33 @@ rpk upgrade               everything installed, up to the repo's version
 rpk remove dropbear
 rpk files dropbear
 rpk owner /usr/bin/ssh
+rpk index                 the repo's INDEX, after it's been checked
 rpk -r /mnt install ...   work on a system mounted somewhere else
 ```
 
-The repo comes from `REPO=` in `/etc/rpk.conf`. `RPK_REPO` in the
-environment overrides it. Installed packages are tracked under
-`/var/db/rpk/<name>/` (`version`, `files`, `depends`).
+The repo comes from `REPO=` in `/etc/rpk.conf`, a directory or an
+http(s) URL. `RPK_REPO` in the environment overrides it. With
+`FALLBACK=` set as well, rpk uses that repo when `REPO` can't be
+reached, which is how a mirror and a local copy go together. Installed
+packages are tracked under `/var/db/rpk/<name>/` (`version`, `files`,
+`depends`).
+
+## Signatures
+
+Every tarball is checked against the sha256 in the INDEX. The INDEX can
+be signed too, with an ed25519 key, as `INDEX.sig` next to it:
+
+```
+openssl genpkey -algorithm ed25519 -out raye.key
+openssl pkey -in raye.key -pubout -out raye.pub
+openssl pkeyutl -sign -inkey raye.key -rawin -in INDEX -out INDEX.sig
+```
+
+Put `raye.pub` in `/etc/rpk/keys/` and rpk checks the signature every
+time it reads an INDEX, and stops at one that isn't signed by any key
+there. No keys, no check. `RPK_KEYS` points it at another directory.
+The `snapshot` script in the packages repo does the signing for a whole
+repo.
 
 Packages are built from the recipes in
 [Raye-Linux/packages](https://github.com/Raye-Linux/packages).
