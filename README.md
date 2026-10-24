@@ -29,6 +29,14 @@ environment overrides it. Installed packages are tracked under
 Packages are built from the recipes in
 [Raye-Linux/packages](https://github.com/Raye-Linux/packages).
 
+## Hooks
+
+A few things are built from what several packages install: compiled
+GSettings schemas, the MIME database. Packages that add to one of those
+ship a script in `/usr/share/rpk/hooks/`, and after every install,
+upgrade or removal rpk runs them all (chrooted, with `-r`). A hook just
+regenerates its cache from what's there, so running one twice is fine.
+
 ## INDEX
 
 One line per package, fields separated by `|`:

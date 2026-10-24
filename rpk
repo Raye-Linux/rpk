@@ -23,6 +23,11 @@
 # URL with the INDEX and tarballs in it. RPK_REPO overrides it.
 #
 # INDEX has one line per package:  name|version|sha256|depends|description
+#
+# Some things span packages: GSettings schemas get compiled into one
+# file, the MIME database too. Packages that add to those ship a script
+# in /usr/share/rpk/hooks, and rpk runs every one of them after it has
+# installed or removed something.
 
 set -e
 
@@ -160,6 +165,18 @@ remove_pkg() {
     rm -rf "${db:?}/$name"
 }
 
+# hooks: run what's in usr/share/rpk/hooks, inside ROOT when that isn't /
+hooks() {
+    for h in "${ROOT%/}"/usr/share/rpk/hooks/*; do
+        [ -x "$h" ] || continue
+        if [ "$ROOT" = / ]; then
+            "$h"
+        else
+            chroot "$ROOT" "/usr/share/rpk/hooks/${h##*/}"
+        fi || msg "the ${h##*/} hook failed"
+    done
+}
+
 need_root() {
     [ "$(id -u)" = 0 ] || die "this needs root"
 }
@@ -229,6 +246,7 @@ case $cmd in
         for p in $pkgs; do
             install_pkg "$p"
         done
+        hooks
         ;;
 
     upgrade)
@@ -254,6 +272,7 @@ case $cmd in
         for p in $pkgs; do
             install_pkg "$p"
         done
+        hooks
         ;;
 
     remove|rm)
@@ -262,6 +281,7 @@ case $cmd in
         for p do
             remove_pkg "$p"
         done
+        hooks
         ;;
 
     *)
